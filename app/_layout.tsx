@@ -1,24 +1,54 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
-
-import { useColorScheme } from '@/hooks/use-color-scheme';
+// app/_layout.tsx
+import { auth } from "@/lib/firebase";
+import { Stack, router, useRootNavigationState } from "expo-router";
+import { StatusBar } from "expo-status-bar";
+import { onAuthStateChanged } from "firebase/auth";
+import { useEffect, useState } from "react";
+import { View } from "react-native";
 
 export const unstable_settings = {
-  anchor: '(tabs)',
+  initialRouteName: "(auth)",
 };
 
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
+  const navigationState = useRootNavigationState();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setIsLoggedIn(!!user);
+      setAuthChecked(true);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!navigationState?.key) return;
+    if (!authChecked) return;
+
+    if (isLoggedIn) {
+      router.replace("/(tabs)");
+    } else {
+      router.replace("/(auth)/login");
+    }
+  }, [navigationState?.key, authChecked, isLoggedIn]);
+
+  if (!navigationState?.key || !authChecked) {
+    return <View style={{ flex: 1, backgroundColor: "#0D0D0F" }} />;
+  }
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+    <>
       <Stack>
+        <Stack.Screen name="(auth)" options={{ headerShown: false }} />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        <Stack.Screen
+          name="modal"
+          options={{ presentation: "modal", title: "Modal" }}
+        />
       </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+      <StatusBar style="light" />
+    </>
   );
 }

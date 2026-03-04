@@ -1,4 +1,16 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
+// app/(tabs)/index.tsx
+import { auth, db } from "@/lib/firebase";
+import { router } from "expo-router";
+import { signOut } from "firebase/auth";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  query,
+  setDoc,
+  where,
+} from "firebase/firestore";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -45,6 +57,7 @@ interface Note {
   timestamp: number;
   updatedAt: number;
   pinned: boolean;
+  userId: string;
 }
 
 const PALETTE = [
@@ -58,8 +71,152 @@ const PALETTE = [
   { hex: "#1A1A1A", accent: "#BDBDBD", name: "Slate" },
 ];
 
-const STORAGE_KEY = "notes_v3";
+const NOTES_COLLECTION = "notes";
 
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+const getNoteAccent = (note: Note) =>
+  PALETTE.find((p) => p.hex === note.color)?.accent ?? "#B39DFF";
+
+const formatTime = (ts: number) => {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  const hrs = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (hrs < 24) return `${hrs}h ago`;
+  if (days < 7) return `${days}d ago`;
+  return new Date(ts).toLocaleDateString();
+};
+
+// ─── PINNED CARD (horizontal scroll) ─────────────────────────────────────────
+function PinnedCard({
+  item,
+  onPress,
+  onDelete,
+}: {
+  item: Note;
+  onPress: () => void;
+  onDelete: () => void;
+}) {
+  const accent = getNoteAccent(item);
+  return (
+    <TouchableOpacity
+      style={[styles.pinnedCard, { backgroundColor: item.color }]}
+      onPress={onPress}
+      activeOpacity={0.82}
+    >
+      <View style={[styles.pinnedAccentLine, { backgroundColor: accent }]} />
+      <View style={styles.pinnedCardBody}>
+        <View style={styles.pinnedCardTop}>
+          <Text
+            style={[styles.pinnedCardTitle, { color: accent }]}
+            numberOfLines={1}
+          >
+            {item.title || item.text.substring(0, 28)}
+          </Text>
+          <TouchableOpacity
+            onPress={onDelete}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={styles.pinnedDeleteIcon}>✕</Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.pinnedCardText} numberOfLines={3}>
+          {item.text}
+        </Text>
+        <Text style={styles.pinnedCardTime}>{formatTime(item.updatedAt)}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// ─── GRID CARD ────────────────────────────────────────────────────────────────
+function GridCard({
+  item,
+  onPress,
+  onDelete,
+}: {
+  item: Note;
+  onPress: () => void;
+  onDelete: () => void;
+}) {
+  const accent = getNoteAccent(item);
+  return (
+    <TouchableOpacity
+      style={[styles.gridCard, { backgroundColor: item.color }]}
+      onPress={onPress}
+      activeOpacity={0.8}
+    >
+      <View style={[styles.cardAccentLine, { backgroundColor: accent }]} />
+      <View style={styles.cardBody}>
+        {item.title ? (
+          <Text style={[styles.cardTitle, { color: accent }]} numberOfLines={1}>
+            {item.title}
+          </Text>
+        ) : null}
+        <Text style={styles.cardText} numberOfLines={5}>
+          {item.text}
+        </Text>
+      </View>
+      <View style={styles.cardFooter}>
+        <Text style={styles.cardTime}>{formatTime(item.updatedAt)}</Text>
+        <TouchableOpacity
+          onPress={onDelete}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <Text style={styles.cardDeleteIcon}>✕</Text>
+        </TouchableOpacity>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// ─── LIST CARD ────────────────────────────────────────────────────────────────
+function ListCard({
+  item,
+  onPress,
+  onDelete,
+}: {
+  item: Note;
+  onPress: () => void;
+  onDelete: () => void;
+}) {
+  const accent = getNoteAccent(item);
+  return (
+    <TouchableOpacity
+      style={[styles.listCard, { borderLeftColor: accent }]}
+      onPress={onPress}
+      activeOpacity={0.8}
+    >
+      <View style={styles.listCardInner}>
+        <View style={{ flex: 1 }}>
+          <Text
+            style={[styles.listCardTitle, { color: accent }]}
+            numberOfLines={1}
+          >
+            {item.title || item.text.substring(0, 40)}
+          </Text>
+          {item.title ? (
+            <Text style={styles.listCardText} numberOfLines={2}>
+              {item.text}
+            </Text>
+          ) : null}
+          <Text style={styles.listCardTime}>{formatTime(item.updatedAt)}</Text>
+        </View>
+        <TouchableOpacity
+          onPress={onDelete}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          style={styles.listDeleteBtn}
+        >
+          <Text style={styles.cardDeleteIcon}>✕</Text>
+        </TouchableOpacity>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// ─── MAIN SCREEN ─────────────────────────────────────────────────────────────
 export default function NotesScreen() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -68,51 +225,50 @@ export default function NotesScreen() {
   const [noteTitle, setNoteTitle] = useState("");
   const [noteText, setNoteText] = useState("");
   const [selectedColor, setSelectedColor] = useState(PALETTE[0]);
-  const [sortBy, setSortBy] = useState<"newest" | "oldest" | "pinned">(
-    "newest",
-  );
+  const [sortBy, setSortBy] = useState<"newest" | "oldest">("newest");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
 
   const fabScale = useRef(new Animated.Value(0)).current;
   const fabRotate = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    loadNotes();
+    const unsub = loadNotes();
     Animated.spring(fabScale, {
       toValue: 1,
       useNativeDriver: true,
       tension: 70,
       friction: 6,
     }).start();
+    return () => { if (unsub) unsub(); };
   }, []);
 
-  useEffect(() => {
-    saveNotes();
-  }, [notes]);
-
-  const animateFabOpen = (open: boolean) => {
+  const animateFab = (open: boolean) =>
     Animated.spring(fabRotate, {
       toValue: open ? 1 : 0,
       useNativeDriver: true,
       tension: 80,
     }).start();
+
+  // Firestore realtime listener
+  const loadNotes = () => {
+    const user = auth.currentUser;
+    if (!user) return;
+    const q = query(collection(db, NOTES_COLLECTION), where("userId", "==", user.uid));
+    return onSnapshot(q, (snapshot) => {
+      setNotes(snapshot.docs.map((d) => d.data() as Note));
+    });
   };
 
-  const loadNotes = async () => {
+  const saveNoteToFirestore = async (note: Note) => {
     try {
-      const data = await AsyncStorage.getItem(STORAGE_KEY);
-      if (data) setNotes(JSON.parse(data));
-    } catch (e) {
-      console.error("Load error:", e);
-    }
+      await setDoc(doc(db, NOTES_COLLECTION, note.id), note);
+    } catch (e) { console.error("Save error:", e); }
   };
 
-  const saveNotes = async () => {
+  const deleteNoteFromFirestore = async (id: string) => {
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
-    } catch (e) {
-      console.error("Save error:", e);
-    }
+      await deleteDoc(doc(db, NOTES_COLLECTION, id));
+    } catch (e) { console.error("Delete error:", e); }
   };
 
   const openAddModal = () => {
@@ -120,7 +276,7 @@ export default function NotesScreen() {
     setNoteTitle("");
     setNoteText("");
     setSelectedColor(PALETTE[0]);
-    animateFabOpen(true);
+    animateFab(true);
     setModalVisible(true);
   };
 
@@ -132,24 +288,21 @@ export default function NotesScreen() {
     setModalVisible(true);
   };
 
-  const saveNote = () => {
+  const saveNote = async () => {
     if (!noteText.trim() && !noteTitle.trim()) return;
+    const user = auth.currentUser;
+    if (!user) return;
 
     if (editingNote) {
-      setNotes((prev) =>
-        prev.map((n) =>
-          n.id === editingNote.id
-            ? {
-                ...n,
-                title: noteTitle.trim(),
-                text: noteText.trim(),
-                color: selectedColor.hex,
-                colorName: selectedColor.name,
-                updatedAt: Date.now(),
-              }
-            : n,
-        ),
-      );
+      const updated = {
+        ...editingNote,
+        title: noteTitle.trim(),
+        text: noteText.trim(),
+        color: selectedColor.hex,
+        colorName: selectedColor.name,
+        updatedAt: Date.now(),
+      };
+      await saveNoteToFirestore(updated);
     } else {
       const newNote: Note = {
         id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -160,14 +313,15 @@ export default function NotesScreen() {
         timestamp: Date.now(),
         updatedAt: Date.now(),
         pinned: false,
+        userId: user.uid,
       };
-      setNotes((prev) => [newNote, ...prev]);
+      await saveNoteToFirestore(newNote);
     }
     closeModal();
   };
 
   const closeModal = () => {
-    animateFabOpen(false);
+    animateFab(false);
     setModalVisible(false);
     setEditingNote(null);
     setNoteTitle("");
@@ -177,15 +331,15 @@ export default function NotesScreen() {
 
   const deleteNote = (id: string) => {
     Alert.alert(
-      "Note Delete Karo",
-      "Kya aap wakai yeh note delete karna chahte hain?",
+      "Delete Note",
+      "Are you sure you want to delete this note?",
       [
-        { text: "Nahi", style: "cancel" },
+        { text: "Cancel", style: "cancel" },
         {
-          text: "Haan, Delete",
+          text: "Delete",
           style: "destructive",
-          onPress: () => {
-            setNotes((prev) => prev.filter((n) => n.id !== id));
+          onPress: async () => {
+            await deleteNoteFromFirestore(id);
             if (editingNote?.id === id) closeModal();
           },
         },
@@ -194,156 +348,53 @@ export default function NotesScreen() {
     );
   };
 
-  const togglePin = (id: string) => {
-    setNotes((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, pinned: !n.pinned } : n)),
+  const togglePin = async (id: string) => {
+    const note = notes.find((n) => n.id === id);
+    if (!note) return;
+    const updated = { ...note, pinned: !note.pinned };
+    await saveNoteToFirestore(updated);
+  };
+
+  // ── Derived data
+  const matchesSearch = (n: Note) =>
+    n.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    n.title.toLowerCase().includes(searchQuery.toLowerCase());
+
+  const allFiltered = notes.filter(matchesSearch);
+  const pinnedNotes = allFiltered.filter((n) => n.pinned);
+  const unpinnedNotes = allFiltered
+    .filter((n) => !n.pinned)
+    .sort((a, b) =>
+      sortBy === "newest"
+        ? b.updatedAt - a.updatedAt
+        : a.timestamp - b.timestamp,
     );
-  };
-
-  const formatTime = (ts: number) => {
-    const diff = Date.now() - ts;
-    const mins = Math.floor(diff / 60000);
-    const hrs = Math.floor(diff / 3600000);
-    const days = Math.floor(diff / 86400000);
-    if (mins < 1) return "Abhi abhi";
-    if (mins < 60) return `${mins}m`;
-    if (hrs < 24) return `${hrs}h`;
-    if (days < 7) return `${days}d`;
-    return new Date(ts).toLocaleDateString();
-  };
-
-  const getSortedNotes = () => {
-    let filtered = notes.filter(
-      (n) =>
-        n.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        n.title.toLowerCase().includes(searchQuery.toLowerCase()),
-    );
-    if (sortBy === "newest") filtered.sort((a, b) => b.updatedAt - a.updatedAt);
-    else if (sortBy === "oldest")
-      filtered.sort((a, b) => a.timestamp - b.timestamp);
-    else filtered.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
-    return filtered;
-  };
-
-  const filteredNotes = getSortedNotes();
-  const pinnedCount = notes.filter((n) => n.pinned).length;
 
   const fabRotateInterp = fabRotate.interpolate({
     inputRange: [0, 1],
     outputRange: ["0deg", "45deg"],
   });
 
-  const getNoteAccent = (note: Note) =>
-    PALETTE.find((p) => p.hex === note.color)?.accent ?? "#B39DFF";
-
-  const renderGridNote = ({ item }: { item: Note }) => (
-    <TouchableOpacity
-      style={[styles.gridCard, { backgroundColor: item.color }]}
+  // ── Render helpers
+  const renderGridItem = ({ item }: { item: Note }) => (
+    <GridCard
+      item={item}
       onPress={() => openEditModal(item)}
-      activeOpacity={0.8}
-    >
-      <View
-        style={[
-          styles.cardAccentLine,
-          { backgroundColor: getNoteAccent(item) },
-        ]}
-      />
-      {item.pinned && (
-        <View style={styles.pinBadge}>
-          <Text style={[styles.pinDot, { color: getNoteAccent(item) }]}>●</Text>
-        </View>
-      )}
-      <View style={styles.cardBody}>
-        {item.title ? (
-          <Text
-            style={[styles.cardTitle, { color: getNoteAccent(item) }]}
-            numberOfLines={1}
-          >
-            {item.title}
-          </Text>
-        ) : null}
-        <Text style={styles.cardText} numberOfLines={5}>
-          {item.text}
-        </Text>
-      </View>
-      <View style={styles.cardFooter}>
-        <Text style={styles.cardTime}>{formatTime(item.updatedAt)}</Text>
-        <TouchableOpacity
-          onPress={() => deleteNote(item.id)}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Text style={styles.cardDeleteIcon}>✕</Text>
-        </TouchableOpacity>
-      </View>
-    </TouchableOpacity>
+      onDelete={() => deleteNote(item.id)}
+    />
+  );
+  const renderListItem = ({ item }: { item: Note }) => (
+    <ListCard
+      item={item}
+      onPress={() => openEditModal(item)}
+      onDelete={() => deleteNote(item.id)}
+    />
   );
 
-  const renderListNote = ({ item }: { item: Note }) => (
-    <TouchableOpacity
-      style={[styles.listCard, { borderLeftColor: getNoteAccent(item) }]}
-      onPress={() => openEditModal(item)}
-      activeOpacity={0.8}
-    >
-      <View style={styles.listCardInner}>
-        <View style={{ flex: 1 }}>
-          <View style={styles.listTitleRow}>
-            {item.pinned && (
-              <Text style={[styles.listPinDot, { color: getNoteAccent(item) }]}>
-                ●{" "}
-              </Text>
-            )}
-            <Text
-              style={[styles.listCardTitle, { color: getNoteAccent(item) }]}
-              numberOfLines={1}
-            >
-              {item.title || item.text.substring(0, 40)}
-            </Text>
-          </View>
-          {item.title ? (
-            <Text style={styles.listCardText} numberOfLines={2}>
-              {item.text}
-            </Text>
-          ) : null}
-          <Text style={styles.listCardTime}>
-            {formatTime(item.updatedAt)} ago
-          </Text>
-        </View>
-        <TouchableOpacity
-          onPress={() => deleteNote(item.id)}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          style={styles.listDeleteBtn}
-        >
-          <Text style={styles.cardDeleteIcon}>✕</Text>
-        </TouchableOpacity>
-      </View>
-    </TouchableOpacity>
-  );
-
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="light-content" backgroundColor={DARK.bg} />
-
-      {/* ── HEADER ── */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.appTitle}>Notes</Text>
-          <Text style={styles.appSub}>
-            {notes.length} {notes.length === 1 ? "note" : "notes"}
-            {pinnedCount > 0 ? `  ·  ${pinnedCount} pinned` : ""}
-          </Text>
-        </View>
-        <TouchableOpacity
-          style={styles.viewToggleBtn}
-          onPress={() => setViewMode(viewMode === "grid" ? "list" : "grid")}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.viewToggleText}>
-            {viewMode === "grid" ? "☰" : "⊞"}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* ── SEARCH ── */}
+  // ── List header: pinned section + search + sort
+  const ListHeader = () => (
+    <>
+      {/* Search */}
       <View style={styles.searchWrapper}>
         <Text style={styles.searchIconText}>⌕</Text>
         <TextInput
@@ -364,66 +415,176 @@ export default function NotesScreen() {
         )}
       </View>
 
-      {/* ── SORT PILLS ── */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.sortRow}
-      >
-        {(["newest", "oldest", "pinned"] as const).map((s) => (
+      {/* Pinned Section */}
+      {pinnedNotes.length > 0 && (
+        <View style={styles.pinnedSection}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionLabel}>📌 PINNED</Text>
+            <Text style={styles.sectionCount}>{pinnedNotes.length}</Text>
+          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.pinnedScroll}
+          >
+            {pinnedNotes.map((note) => (
+              <PinnedCard
+                key={note.id}
+                item={note}
+                onPress={() => openEditModal(note)}
+                onDelete={() => deleteNote(note.id)}
+              />
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Sort + View Toggle row */}
+      {unpinnedNotes.length > 0 && (
+        <View style={styles.controlsRow}>
+          <View style={styles.sortPills}>
+            {(["newest", "oldest"] as const).map((s) => (
+              <TouchableOpacity
+                key={s}
+                style={[styles.sortPill, sortBy === s && styles.sortPillActive]}
+                onPress={() => setSortBy(s)}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.sortPillText,
+                    sortBy === s && styles.sortPillTextActive,
+                  ]}
+                >
+                  {s === "newest" ? "Newest" : "Oldest"}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
           <TouchableOpacity
-            key={s}
-            style={[styles.sortPill, sortBy === s && styles.sortPillActive]}
-            onPress={() => setSortBy(s)}
+            style={styles.viewToggleBtn}
+            onPress={() => setViewMode(viewMode === "grid" ? "list" : "grid")}
             activeOpacity={0.7}
           >
-            <Text
-              style={[
-                styles.sortPillText,
-                sortBy === s && styles.sortPillTextActive,
-              ]}
-            >
-              {s === "newest"
-                ? "Newest"
-                : s === "oldest"
-                  ? "Oldest"
-                  : "⭐ Pinned"}
+            <Text style={styles.viewToggleText}>
+              {viewMode === "grid" ? "☰" : "⊞"}
             </Text>
           </TouchableOpacity>
-        ))}
-      </ScrollView>
+        </View>
+      )}
+
+      {unpinnedNotes.length > 0 && (
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionLabel}>ALL NOTES</Text>
+          <Text style={styles.sectionCount}>{unpinnedNotes.length}</Text>
+        </View>
+      )}
+    </>
+  );
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar barStyle="light-content" backgroundColor={DARK.bg} />
+
+      {/* ── HEADER ── */}
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.appTitle}>Notes</Text>
+          <Text style={styles.appSub}>
+            {notes.length} {notes.length === 1 ? "note" : "notes"}
+            {pinnedNotes.length > 0 && !searchQuery
+              ? `  ·  ${pinnedNotes.length} pinned`
+              : ""}
+          </Text>
+        </View>
+        {/* Profile avatar placeholder */}
+        <TouchableOpacity
+          style={styles.avatarBtn}
+          activeOpacity={0.8}
+          onPress={() =>
+            Alert.alert("Sign Out", "Are you sure you want to sign out?", [
+              { text: "Cancel", style: "cancel" },
+              {
+                text: "Sign Out",
+                style: "destructive",
+                onPress: async () => {
+                  await signOut(auth);
+                  router.replace("/(auth)/login");
+                },
+              },
+            ])
+          }
+        >
+          <Text style={styles.avatarText}>↪</Text>
+        </TouchableOpacity>
+      </View>
 
       <View style={styles.divider} />
 
-      {/* ── NOTES ── */}
-      <FlatList
-        key={viewMode}
-        data={filteredNotes}
-        renderItem={viewMode === "grid" ? renderGridNote : renderListNote}
-        keyExtractor={(item) => item.id}
-        numColumns={viewMode === "grid" ? 2 : 1}
-        columnWrapperStyle={
-          viewMode === "grid" ? styles.columnWrapper : undefined
-        }
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={[
-          styles.listContent,
-          filteredNotes.length === 0 && styles.listContentEmpty,
-        ]}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyGlyph}>✎</Text>
-            <Text style={styles.emptyTitle}>
-              {searchQuery ? "No results found" : "No notes yet"}
-            </Text>
-            <Text style={styles.emptySub}>
-              {searchQuery
-                ? `Nothing matches "${searchQuery}"`
-                : "Tap + to write your first note"}
-            </Text>
-          </View>
-        }
-      />
+      {/* ── NOTES LIST (with pinned section in header) ── */}
+      {viewMode === "grid" ? (
+        <FlatList
+          key="grid"
+          data={unpinnedNotes}
+          renderItem={renderGridItem}
+          keyExtractor={(item) => item.id}
+          numColumns={2}
+          columnWrapperStyle={styles.columnWrapper}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[
+            styles.listContent,
+            unpinnedNotes.length === 0 &&
+              pinnedNotes.length === 0 &&
+              styles.listContentEmpty,
+          ]}
+          ListHeaderComponent={<ListHeader />}
+          ListEmptyComponent={
+            pinnedNotes.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyGlyph}>✎</Text>
+                <Text style={styles.emptyTitle}>
+                  {searchQuery ? "No results found" : "No notes yet"}
+                </Text>
+                <Text style={styles.emptySub}>
+                  {searchQuery
+                    ? `Nothing matches "${searchQuery}"`
+                    : "Tap + to write your first note"}
+                </Text>
+              </View>
+            ) : null
+          }
+        />
+      ) : (
+        <FlatList
+          key="list"
+          data={unpinnedNotes}
+          renderItem={renderListItem}
+          keyExtractor={(item) => item.id}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[
+            styles.listContent,
+            unpinnedNotes.length === 0 &&
+              pinnedNotes.length === 0 &&
+              styles.listContentEmpty,
+          ]}
+          ListHeaderComponent={<ListHeader />}
+          ListEmptyComponent={
+            pinnedNotes.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyGlyph}>✎</Text>
+                <Text style={styles.emptyTitle}>
+                  {searchQuery ? "No results found" : "No notes yet"}
+                </Text>
+                <Text style={styles.emptySub}>
+                  {searchQuery
+                    ? `Nothing matches "${searchQuery}"`
+                    : "Tap + to write your first note"}
+                </Text>
+              </View>
+            ) : null
+          }
+        />
+      )}
 
       {/* ── FAB ── */}
       <Animated.View
@@ -445,7 +606,7 @@ export default function NotesScreen() {
         </TouchableOpacity>
       </Animated.View>
 
-      {/* ── MODAL ── */}
+      {/* ── MODAL: ADD / EDIT ── */}
       <Modal
         visible={modalVisible}
         animationType="slide"
@@ -561,7 +722,7 @@ export default function NotesScreen() {
                 </ScrollView>
               </View>
 
-              {/* Action Buttons */}
+              {/* Buttons */}
               <View style={styles.modalActions}>
                 <TouchableOpacity
                   style={styles.cancelBtn}
@@ -583,7 +744,7 @@ export default function NotesScreen() {
                   activeOpacity={0.85}
                 >
                   <Text style={styles.saveBtnText}>
-                    {editingNote ? "Update" : "Save Note"}
+                    {editingNote ? "Update Note" : "Save Note"}
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -591,8 +752,7 @@ export default function NotesScreen() {
               {editingNote && (
                 <Text style={styles.editMeta}>
                   Created {new Date(editingNote.timestamp).toLocaleDateString()}
-                  {"  ·  "}
-                  Edited {formatTime(editingNote.updatedAt)} ago
+                  {"  ·  "}Edited {formatTime(editingNote.updatedAt)}
                 </Text>
               )}
             </View>
@@ -603,11 +763,9 @@ export default function NotesScreen() {
   );
 }
 
+// ─── STYLES ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: DARK.bg,
-  },
+  safeArea: { flex: 1, backgroundColor: DARK.bg },
 
   // Header
   header: {
@@ -624,25 +782,24 @@ const styles = StyleSheet.create({
     color: DARK.text,
     letterSpacing: -1,
   },
-  appSub: {
-    fontSize: 13,
-    color: DARK.textSub,
-    marginTop: 3,
-    letterSpacing: 0.2,
-  },
-  viewToggleBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 13,
-    backgroundColor: DARK.surfaceHigh,
+  appSub: { fontSize: 13, color: DARK.textSub, marginTop: 3 },
+  avatarBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: DARK.accentDim,
     borderWidth: 1,
-    borderColor: DARK.border,
+    borderColor: DARK.accent,
     justifyContent: "center",
     alignItems: "center",
   },
-  viewToggleText: {
-    fontSize: 20,
-    color: DARK.textSub,
+  avatarText: { fontSize: 16, fontWeight: "800", color: DARK.accent },
+
+  divider: {
+    height: 1,
+    backgroundColor: DARK.border,
+    marginHorizontal: 16,
+    marginBottom: 4,
   },
 
   // Search
@@ -652,7 +809,7 @@ const styles = StyleSheet.create({
     backgroundColor: DARK.surface,
     borderRadius: 14,
     marginHorizontal: 16,
-    marginBottom: 12,
+    marginVertical: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
     borderWidth: 1,
@@ -664,52 +821,106 @@ const styles = StyleSheet.create({
     marginRight: 8,
     lineHeight: 22,
   },
-  searchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: DARK.text,
-    padding: 0,
+  searchInput: { flex: 1, fontSize: 15, color: DARK.text, padding: 0 },
+  clearBtn: { fontSize: 13, color: DARK.textSub, paddingLeft: 8 },
+
+  // Pinned Section
+  pinnedSection: { marginBottom: 6 },
+  sectionHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    marginBottom: 10,
   },
-  clearBtn: {
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: DARK.textMuted,
+    letterSpacing: 1.5,
+  },
+  sectionCount: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: DARK.textMuted,
+    backgroundColor: DARK.surfaceHigh,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+    overflow: "hidden",
+  },
+  pinnedScroll: { paddingHorizontal: 16, gap: 12, paddingBottom: 4 },
+  pinnedCard: {
+    width: 180,
+    borderRadius: 16,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+    marginRight: 4,
+  },
+  pinnedAccentLine: { height: 3, width: "100%", opacity: 0.9 },
+  pinnedCardBody: { padding: 12 },
+  pinnedCardTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  pinnedCardTitle: {
     fontSize: 13,
-    color: DARK.textSub,
+    fontWeight: "700",
+    flex: 1,
+    letterSpacing: 0.1,
+  },
+  pinnedDeleteIcon: {
+    fontSize: 11,
+    color: "rgba(240,239,248,0.3)",
     paddingLeft: 8,
   },
-
-  // Sort Pills
-  sortRow: {
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    alignItems: "center",
+  pinnedCardText: {
+    fontSize: 12,
+    color: "rgba(240,239,248,0.65)",
+    lineHeight: 17,
+    marginBottom: 8,
   },
-  sortPill: {
+  pinnedCardTime: {
+    fontSize: 10,
+    color: "rgba(240,239,248,0.3)",
+    letterSpacing: 0.3,
+  },
+
+  // Controls Row
+  controlsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    marginBottom: 14,
+    marginTop: 4,
+  },
+  sortPills: { flexDirection: "row", gap: 8 },
+  sortPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
     borderRadius: 20,
     backgroundColor: DARK.surface,
-    marginRight: 8,
     borderWidth: 1,
     borderColor: DARK.border,
   },
-  sortPillActive: {
-    backgroundColor: DARK.accentDim,
-    borderColor: DARK.accent,
+  sortPillActive: { backgroundColor: DARK.accentDim, borderColor: DARK.accent },
+  sortPillText: { fontSize: 13, fontWeight: "600", color: DARK.textSub },
+  sortPillTextActive: { color: DARK.accent },
+  viewToggleBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 11,
+    backgroundColor: DARK.surfaceHigh,
+    borderWidth: 1,
+    borderColor: DARK.border,
+    justifyContent: "center",
+    alignItems: "center",
   },
-  sortPillText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: DARK.textSub,
-  },
-  sortPillTextActive: {
-    color: DARK.accent,
-  },
-
-  divider: {
-    height: 1,
-    backgroundColor: DARK.border,
-    marginHorizontal: 16,
-    marginBottom: 14,
-  },
+  viewToggleText: { fontSize: 18, color: DARK.textSub },
 
   // Grid
   columnWrapper: {
@@ -717,12 +928,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     marginBottom: 14,
   },
-  listContent: {
-    paddingBottom: 110,
-  },
-  listContentEmpty: {
-    flexGrow: 1,
-  },
+  listContent: { paddingBottom: 110 },
+  listContentEmpty: { flexGrow: 1 },
   gridCard: {
     width: CARD_WIDTH,
     minHeight: 145,
@@ -731,35 +938,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.06)",
   },
-  cardAccentLine: {
-    height: 3,
-    width: "100%",
-    opacity: 0.8,
-  },
-  pinBadge: {
-    position: "absolute",
-    top: 12,
-    right: 12,
-  },
-  pinDot: {
-    fontSize: 8,
-  },
-  cardBody: {
-    padding: 12,
-    paddingTop: 10,
-    flex: 1,
-  },
+  cardAccentLine: { height: 3, width: "100%", opacity: 0.8 },
+  cardBody: { padding: 12, paddingTop: 10, flex: 1 },
   cardTitle: {
     fontSize: 13,
     fontWeight: "700",
     marginBottom: 5,
     letterSpacing: 0.1,
   },
-  cardText: {
-    fontSize: 12.5,
-    color: "rgba(240,239,248,0.72)",
-    lineHeight: 18,
-  },
+  cardText: { fontSize: 12.5, color: "rgba(240,239,248,0.72)", lineHeight: 18 },
   cardFooter: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -775,10 +962,7 @@ const styles = StyleSheet.create({
     color: "rgba(240,239,248,0.35)",
     letterSpacing: 0.3,
   },
-  cardDeleteIcon: {
-    fontSize: 11,
-    color: "rgba(240,239,248,0.3)",
-  },
+  cardDeleteIcon: { fontSize: 11, color: "rgba(240,239,248,0.3)" },
 
   // List
   listCard: {
@@ -797,14 +981,6 @@ const styles = StyleSheet.create({
     padding: 14,
     paddingLeft: 16,
   },
-  listTitleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  listPinDot: {
-    fontSize: 8,
-    marginRight: 4,
-  },
   listCardTitle: {
     fontSize: 15,
     fontWeight: "700",
@@ -817,28 +993,17 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 4,
   },
-  listCardTime: {
-    fontSize: 11,
-    color: DARK.textMuted,
-    marginTop: 6,
-  },
-  listDeleteBtn: {
-    paddingLeft: 16,
-    paddingVertical: 4,
-  },
+  listCardTime: { fontSize: 11, color: DARK.textMuted, marginTop: 6 },
+  listDeleteBtn: { paddingLeft: 16, paddingVertical: 4 },
 
   // Empty
   emptyState: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingTop: 80,
+    paddingTop: 60,
   },
-  emptyGlyph: {
-    fontSize: 72,
-    color: DARK.border,
-    marginBottom: 20,
-  },
+  emptyGlyph: { fontSize: 64, color: DARK.border, marginBottom: 16 },
   emptyTitle: {
     fontSize: 20,
     fontWeight: "700",
@@ -855,11 +1020,7 @@ const styles = StyleSheet.create({
   },
 
   // FAB
-  fabWrapper: {
-    position: "absolute",
-    bottom: 32,
-    right: 22,
-  },
+  fabWrapper: { position: "absolute", bottom: 32, right: 22 },
   fab: {
     width: 60,
     height: 60,
@@ -911,15 +1072,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 20,
   },
-  modalHeading: {
-    fontSize: 22,
-    fontWeight: "800",
-    letterSpacing: -0.5,
-  },
-  modalHeaderActions: {
-    flexDirection: "row",
-    gap: 6,
-  },
+  modalHeading: { fontSize: 22, fontWeight: "800", letterSpacing: -0.5 },
+  modalHeaderActions: { flexDirection: "row", gap: 6 },
   modalIconBtn: {
     width: 36,
     height: 36,
@@ -929,12 +1083,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginLeft: 6,
   },
-  modalIconBtnDanger: {
-    backgroundColor: "rgba(255,90,90,0.15)",
-  },
-  modalIconBtnText: {
-    fontSize: 15,
-  },
+  modalIconBtnDanger: { backgroundColor: "rgba(255,90,90,0.15)" },
+  modalIconBtnText: { fontSize: 15 },
   titleInput: {
     fontSize: 20,
     fontWeight: "700",
@@ -951,9 +1101,7 @@ const styles = StyleSheet.create({
     textAlignVertical: "top",
     marginBottom: 20,
   },
-  colorSection: {
-    marginBottom: 22,
-  },
+  colorSection: { marginBottom: 22 },
   colorSectionLabel: {
     fontSize: 11,
     fontWeight: "700",
@@ -961,10 +1109,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginBottom: 12,
   },
-  colorRow: {
-    flexDirection: "row",
-    gap: 10,
-  },
+  colorRow: { flexDirection: "row", gap: 10 },
   colorChip: {
     width: 38,
     height: 38,
@@ -975,19 +1120,9 @@ const styles = StyleSheet.create({
     marginRight: 8,
     opacity: 0.7,
   },
-  colorChipSelected: {
-    opacity: 1,
-    transform: [{ scale: 1.15 }],
-  },
-  colorChipCheck: {
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  modalActions: {
-    flexDirection: "row",
-    gap: 12,
-    marginBottom: 6,
-  },
+  colorChipSelected: { opacity: 1, transform: [{ scale: 1.15 }] },
+  colorChipCheck: { fontSize: 16, fontWeight: "800" },
+  modalActions: { flexDirection: "row", gap: 12, marginBottom: 6 },
   cancelBtn: {
     flex: 1,
     paddingVertical: 16,
@@ -997,20 +1132,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.06)",
   },
-  cancelBtnText: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: DARK.textSub,
-  },
+  cancelBtnText: { fontSize: 15, fontWeight: "700", color: DARK.textSub },
   saveBtn: {
     flex: 2,
     paddingVertical: 16,
     borderRadius: 16,
     alignItems: "center",
   },
-  saveBtnDisabled: {
-    opacity: 0.3,
-  },
+  saveBtnDisabled: { opacity: 0.3 },
   saveBtnText: {
     fontSize: 15,
     fontWeight: "800",
